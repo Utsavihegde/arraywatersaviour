@@ -11,6 +11,7 @@
 #define FULL_PERCENT     90
 #define TOTAL_READINGS   10
 #define MAX_TIMEOUTS     3
+#define MIN_VALID_FOR_RELAY_ON  2
 
 typedef struct {
     int number;
@@ -84,15 +85,12 @@ void tank_task(void *arg)
                 total_distance += distance;
                 valid_count++;
                 timeouts_in_a_row = 0;
-                printf("T%d Reading %d/%d | Distance: %.1f cm | Water: %.1f%%\n",
-                       tank->number, reading, TOTAL_READINGS, distance,
-                       (TANK_DEPTH_CM - distance) / TANK_DEPTH_CM * 100.0);
+                printf("T%d Reading %d/%d | Distance: %.1f cm | Water: %.1f%%\n",tank->number, reading, TOTAL_READINGS, distance, (TANK_DEPTH_CM - distance) / TANK_DEPTH_CM * 100.0);
             }
             else
             {
                 timeouts_in_a_row++;
-                printf("T%d Reading %d/%d | Not valid | Timeouts: %d\n",
-                       tank->number, reading, TOTAL_READINGS, timeouts_in_a_row);
+                printf("T%d Reading %d/%d | Not valid | Timeouts: %d\n",tank->number, reading, TOTAL_READINGS, timeouts_in_a_row);
             }
 
             // 3 timeouts in a row: relay OFF, raise malfunction, exit the loop
@@ -112,8 +110,7 @@ void tank_task(void *arg)
 
         if (malfunction)
         {
-            printf("T%d MALFUNCTION: %d timeouts in a row | RELAY: OFF | restarting cycle\n",
-                   tank->number, MAX_TIMEOUTS);
+            printf("T%d MALFUNCTION: %d timeouts in a row | RELAY: OFF | restarting cycle\n", tank->number, MAX_TIMEOUTS);
         }
         else if (valid_count == 0)
         {
@@ -131,15 +128,14 @@ void tank_task(void *arg)
 
             if (gpio_get_level(tank->float_pin) == 1 || water_percent >= FULL_PERCENT)
                 relay_on = 0;
-            else if (water_percent < LOW_PERCENT)
+            else if (water_percent < LOW_PERCENT && valid_count >= MIN_VALID_FOR_RELAY_ON)
                 relay_on = 1;
 
             gpio_set_level(tank->relay, relay_on);
-            printf("T%d Water: %.1f%% | Valid: %d | RELAY: %s\n",
-                   tank->number, water_percent, valid_count, relay_on ? "ON" : "OFF");
+            printf("T%d Water: %.1f%% | Valid: %d | RELAY: %s\n",tank->number, water_percent, valid_count, relay_on ? "ON" : "OFF");
         }
 
-        vTaskDelay(10000 / portTICK_PERIOD_MS);   // gap before next cycle
+        vTaskDelay(10000 / portTICK_PERIOD_MS);   
     }
 }
 
