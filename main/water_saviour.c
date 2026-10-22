@@ -5,118 +5,147 @@
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 
-#define DEPTH 100.0     
-#define LOW   50
-#define FULL  90
+#define TANK_DEPTH_CM    200
+#define MIN_DISTANCE_CM  20
+#define LOW_PERCENT      20
+#define FULL_PERCENT     90
+#define TOTAL_READINGS   10
+#define MAX_TIMEOUTS     3
 
-int tank1[5] = {1, 5, 18, 4, 23};     // id, trig, echo, float, relay
-int tank2[5] = {2, 16, 17, 19, 27};
+typedef struct {
+    int number;
+    int trig;
+    int echo;
+    int float_pin;
+    int relay;
+} tank_t;
 
-volatile float avg[2] = {100, 100};   
-volatile int timeouts[2] = {0, 0};    
+tank_t tank1 = {1, 5, 18, 4, 23};
+tank_t tank2 = {2, 16, 17, 19, 27};
 
-float get_distance(int trig, int echo)
+float get_distance(tank_t *tank)
 {
-    gpio_set_level(trig, 1);
+    gpio_set_level(tank->trig, 1);
     esp_rom_delay_us(10);
-    gpio_set_level(trig, 0);
+    gpio_set_level(tank->trig, 0);
 
-    int64_t t = esp_timer_get_time();
-    while (gpio_get_level(echo) == 0)
-        if (esp_timer_get_time() - t > 20000) return -1;
+    int64_t wait_start = esp_timer_get_time();
+    while (gpio_get_level(tank->echo) == 0)
+        if (esp_timer_get_time() - wait_start > 20000) return -1;
 
-    int64_t start = esp_timer_get_time();
-    while (gpio_get_level(echo) == 1)
-        if (esp_timer_get_time() - start > 20000) return -1;
+    int64_t pulse_start = esp_timer_get_time();
+    while (gpio_get_level(tank->echo) == 1)
+        if (esp_timer_get_time() - pulse_start > 20000) return -1;
 
-    return (esp_timer_get_time() - start) * 0.0343 / 2.0;
+    return (esp_timer_get_time() - pulse_start) * 0.0343 / 2.0;
 }
 
-// highest priority: decides the relay
-void logic_task(void *arg)
+// returns 1 if the reading is good, 0 if not
+int is_valid(float distance)
 {
-    int *p = (int *)arg;
-    int id = p[0], fl = p[3], relay = p[4];
-
-    vTaskDelay(pdMS_TO_TICKS(1000));   
-
-    while (1)
-    {
-        int on = gpio_get_level(relay);
-
-        if (gpio_get_level(fl) == 1 || timeouts[id - 1] >= 3 || avg[id - 1] >= FULL)
-            on = 0;
-        else if (avg[id - 1] < LOW && gpio_get_level(fl) == 0)
-            on = 1;
-
-        gpio_set_level(relay, on);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    if (distance > MIN_DISTANCE_CM && distance <= TANK_DEPTH_CM)
+        return 1;
+    return 0;
 }
 
-// lower priority: only measures
 void tank_task(void *arg)
 {
-    int *p = (int *)arg;
-    int id = p[0], trig = p[1], echo = p[2], fl = p[3], relay = p[4];
+    tank_t *tank = (tank_t *)arg;
 
-    gpio_reset_pin(trig);  gpio_set_direction(trig, GPIO_MODE_OUTPUT);
-    gpio_reset_pin(echo);  gpio_set_direction(echo, GPIO_MODE_INPUT);
-    gpio_reset_pin(fl);    gpio_set_direction(fl, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(fl, GPIO_PULLUP_ONLY);
-    gpio_reset_pin(relay); gpio_set_direction(relay, GPIO_MODE_INPUT_OUTPUT);
-    gpio_set_level(relay, 0);
+    gpio_reset_pin(tank->trig);       gpio_set_direction(tank->trig, GPIO_MODE_OUTPUT);
+    gpio_reset_pin(tank->echo);       gpio_set_direction(tank->echo, GPIO_MODE_INPUT);
+    gpio_reset_pin(tank->float_pin);  gpio_set_direction(tank->float_pin, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(tank->float_pin, GPIO_PULLUP_ONLY);
+    gpio_reset_pin(tank->relay);      gpio_set_direction(tank->relay, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(tank->relay, 0);
 
-    if (id == 2) vTaskDelay(pdMS_TO_TICKS(1500));
-    printf("started, taking values...\n"); 
+    if (tank->number == 2)
+        vTaskDelay(1500 / portTICK_PERIOD_MS);
+
+    printf("T%d started\n", tank->number);
+
+    int malfunction = 0;
+
     while (1)
     {
-        printf(" ===== Taking 10 readings =====\n");
-        float sum = 0;
-        int valid = 0;
-      //  int gap = gpio_get_level(relay) ? 2000 : 3000;  
+        float total_distance = 0;
+        int valid_count = 0;
+        int timeouts_in_a_row = 0;
+        malfunction = 0;
 
-        for (int i = 0; i < 10; i++)
-{
-    float d = get_distance(trig, echo);
-    if (d > 20 && d <= DEPTH)
-    {
-        sum += d;
-        valid++;
-        timeouts[id - 1] = 0;
-        printf("T%d Reading %d/10 | Distance: %.1f cm | Water: %.1f%%\n",
-               id, i + 1, d, (DEPTH - d) / DEPTH * 100.0);
-    }
-    else
-    {
-        timeouts[id - 1]++;
-        printf("T%d Reading %d/10 | Not valid\n", id, i + 1);
-        if (timeouts[id - 1] >= 3)
-    printf("T%d WARNING: %d timeouts in a row | RELAY forced OFF\n", id, timeouts[id - 1]);
-    }
+        printf("T%d ===== Taking %d readings =====\n", tank->number, TOTAL_READINGS);
 
-    vTaskDelay(7000 / portTICK_PERIOD_MS);
-}
-
-        if (valid == 0)
+        for (int reading = 1; reading <= TOTAL_READINGS; reading++)
         {
-            avg[id - 1] = 100;     // no average, relay stays OFF
-            printf("T%d No valid reading\n", id);
-            continue;
+            float distance = get_distance(tank);
+
+            if (is_valid(distance))
+            {
+                total_distance += distance;
+                valid_count++;
+                timeouts_in_a_row = 0;
+                printf("T%d Reading %d/%d | Distance: %.1f cm | Water: %.1f%%\n",
+                       tank->number, reading, TOTAL_READINGS, distance,
+                       (TANK_DEPTH_CM - distance) / TANK_DEPTH_CM * 100.0);
+            }
+            else
+            {
+                timeouts_in_a_row++;
+                printf("T%d Reading %d/%d | Not valid | Timeouts: %d\n",
+                       tank->number, reading, TOTAL_READINGS, timeouts_in_a_row);
+            }
+
+            // 3 timeouts in a row: relay OFF, raise malfunction, exit the loop
+            if (timeouts_in_a_row >= MAX_TIMEOUTS)
+            {
+                malfunction = 1;
+                gpio_set_level(tank->relay, 0);
+                break;
+            }
+
+            // sump dry: relay OFF
+            if (gpio_get_level(tank->float_pin) == 1)
+                gpio_set_level(tank->relay, 0);
+
+            vTaskDelay(3000 / portTICK_PERIOD_MS);
         }
 
-        avg[id - 1] = (DEPTH - sum / valid) / DEPTH * 100.0;
-        printf("T%d Water: %.1f%% | Valid: %d | Timeouts: %d | Sump: %d | RELAY: %s\n",
-               id, avg[id - 1], valid, timeouts[id - 1], !gpio_get_level(fl), gpio_get_level(relay) ? "ON" : "OFF");
-               vTaskDelay(10000 / portTICK_PERIOD_MS);  
+        if (malfunction)
+        {
+            printf("T%d MALFUNCTION: %d timeouts in a row | RELAY: OFF | restarting cycle\n",
+                   tank->number, MAX_TIMEOUTS);
+        }
+        else if (valid_count == 0)
+        {
+            gpio_set_level(tank->relay, 0);
+            printf("T%d No valid readings | RELAY: OFF\n", tank->number);
+        }
+        else
+        {
+            float average_distance = total_distance;
+            if (valid_count > 1)
+                average_distance = total_distance / valid_count;
+
+            float water_percent = (TANK_DEPTH_CM - average_distance) / TANK_DEPTH_CM * 100.0;
+            int relay_on = gpio_get_level(tank->relay);
+
+            if (gpio_get_level(tank->float_pin) == 1 || water_percent >= FULL_PERCENT)
+                relay_on = 0;
+            else if (water_percent < LOW_PERCENT)
+                relay_on = 1;
+
+            gpio_set_level(tank->relay, relay_on);
+            printf("T%d Water: %.1f%% | Valid: %d | RELAY: %s\n",
+                   tank->number, water_percent, valid_count, relay_on ? "ON" : "OFF");
+        }
+
+        vTaskDelay(10000 / portTICK_PERIOD_MS);   // gap before next cycle
     }
 }
 
 void app_main(void)
 {
-    printf("System starting.\n");
-    xTaskCreate(tank_task,  "tank1",  4096, tank1, 4, NULL);
-    xTaskCreate(tank_task,  "tank2",  4096, tank2, 4, NULL);
-    xTaskCreate(logic_task, "logic1", 2048, tank1, 6, NULL);
-    xTaskCreate(logic_task, "logic2", 2048, tank2, 6, NULL);
+    printf("System starting\n");
+    xTaskCreate(tank_task, "tank1", 4096, &tank1, 5, NULL);
+    xTaskCreate(tank_task, "tank2", 4096, &tank2, 5, NULL);
 }
