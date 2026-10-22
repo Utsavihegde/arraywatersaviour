@@ -5,15 +5,15 @@
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 
-#define DEPTH 100.0     // change to your tank depth in cm
+#define DEPTH 100.0     
 #define LOW   50
 #define FULL  90
 
 int tank1[5] = {1, 5, 18, 4, 23};     // id, trig, echo, float, relay
 int tank2[5] = {2, 16, 17, 19, 27};
 
-volatile float avg[2] = {100, 100};   // latest average water %, 100 = relay stays OFF until first average
-volatile int timeouts[2] = {0, 0};    // consecutive failed readings
+volatile float avg[2] = {100, 100};   
+volatile int timeouts[2] = {0, 0};    
 
 float get_distance(int trig, int echo)
 {
@@ -38,7 +38,7 @@ void logic_task(void *arg)
     int *p = (int *)arg;
     int id = p[0], fl = p[3], relay = p[4];
 
-    vTaskDelay(pdMS_TO_TICKS(1000));   // wait for tank_task to set up the pins
+    vTaskDelay(pdMS_TO_TICKS(1000));   
 
     while (1)
     {
